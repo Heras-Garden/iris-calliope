@@ -14,7 +14,7 @@ def _required(name: str) -> str:
 @dataclass(frozen=True)
 class Settings:
     discord_token: str
-    database_url: str
+    database_path: str
     encryption_key: str
     llm_base_url: str
     llm_api_key: str
@@ -28,7 +28,7 @@ class Settings:
     def from_env(cls) -> "Settings":
         return cls(
             discord_token=_required("DISCORD_TOKEN"),
-            database_url=_required("DATABASE_URL"),
+            database_path=os.getenv("CALLIOPE_DB_PATH", "/data/calliope.db").strip() or "/data/calliope.db",
             encryption_key=_required("CALLIOPE_ENCRYPTION_KEY"),
             llm_base_url=os.getenv("LLM_BASE_URL", "").strip().rstrip("/"),
             llm_api_key=os.getenv("LLM_API_KEY", "").strip(),

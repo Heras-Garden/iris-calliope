@@ -29,11 +29,11 @@ For trusted Tupperbox RP messages, Calliope stores:
 - creation timestamp; and
 - deletion/expiry timestamp.
 
-Character names and message text are encrypted before they are written to PostgreSQL.
+Character names and message text are encrypted before they are written to Calliope's SQLite database on the deployment volume.
 
 Raw roleplay text is retained for no more than **7 days**. Expired raw messages are deleted automatically whether or not summary generation succeeded.
 
-When a member explicitly runs `/calliope find`, Calliope first searches this seven-day temporary store. If no exact character match is found, she may temporarily read older message history from watched channels in expanding windows (20, 30, 60, 90, 180, and up to 365 days). This older history search is restricted to trusted Tupperbox webhook messages and channels the requesting member can already view. Messages read during this fallback search are not inserted into Calliope's database or retained as a historical backfill.
+When a member explicitly runs `/calliope find`, Calliope first searches this seven-day temporary store. If no exact character match is found, she may temporarily read older message history from watched channels in expanding windows (20, 30, 60, 90, 180, and up to 365 days). This older history search is restricted to trusted Tupperbox webhook messages and channels the requesting member can already view. Messages read during this fallback search are not inserted into Calliope's SQLite database or retained as a historical backfill.
 
 ## What Calliope stores long-term
 
@@ -50,7 +50,7 @@ Calliope does not intentionally:
 - infer relationships between Discord users;
 - build behavioral profiles;
 - collect ordinary server conversation outside watched RP sources; or
-- perform historical backfills of server message history.
+- perform persistent historical backfills of server message history.
 
 ## LLM processing
 
@@ -60,9 +60,9 @@ A deployment operator is responsible for choosing an LLM provider or self-hosted
 
 ## Encryption and security
 
-Sensitive textual data stored by Calliope is encrypted at the application layer with a deployment-specific Fernet key before it is written to PostgreSQL. Discord credentials, database credentials, LLM API keys, and the encryption key must be supplied through deployment environment variables and must not be committed to the repository.
+Sensitive textual data stored by Calliope is encrypted at the application layer with a deployment-specific Fernet key before it is written to SQLite. Discord credentials, LLM API keys, and the encryption key must be supplied through deployment environment variables and must not be committed to the repository.
 
-The deployment operator is also responsible for securing the Railway project, PostgreSQL service, backups, and access controls.
+The SQLite file is expected to live on the deployment's persistent volume. The deployment operator is responsible for securing the Railway project, volume, backups, and access controls.
 
 ## Deletion controls
 

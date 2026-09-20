@@ -15,7 +15,7 @@ Calliope is intentionally story-centric rather than user-centric:
 - No historical backfill feature.
 - No ordinary user-message ingestion.
 - Raw Tupperbox RP text expires after 7 days even if summary generation fails.
-- Message content, character names, and generated summaries are encrypted at the application layer before PostgreSQL storage.
+- Message content, character names, and generated summaries are encrypted at the application layer before SQLite storage.
 
 See [PRIVACY.md](PRIVACY.md) for the full data-handling model.
 
@@ -42,7 +42,7 @@ Calliope uses a strict webhook allowlist so unrelated webhooks never enter the a
 
 - `/calliope info` — show watched channels, retention behavior, source restrictions, and LLM status.
 - `/calliope summary` — privately read recent chronicle entries.
-- `/calliope find character:<name>` — privately locate a character's most recent message. Calliope checks her 7-day temporary store first, then searches older watched Tupperbox history on demand in expanding windows up to one year. Older history is not saved back into the database.
+- `/calliope find character:<name>` — privately locate a character's most recent message. Calliope checks her 7-day temporary store first, then searches older watched Tupperbox history on demand in expanding windows up to one year. Older history is not saved back into SQLite.
 - `/calliope privacy` — explain Calliope's data model.
 - `/calliope my-data` — explain what Calliope stores about the requesting Discord account.
 - `/calliope delete-my-data` — request deletion of account-linked data; in the current model there is no Discord-user-linked RP profile.
@@ -75,18 +75,33 @@ The system prompt explicitly tells the model to summarize fictional events only 
 
 Calliope itself does not train or fine-tune a model on Discord message content. Operators should only configure an LLM endpoint whose own data-handling terms are appropriate for the server.
 
-## Railway deployment
+## Railway deployment with a volume
 
-Calliope is designed for a Railway worker plus Railway PostgreSQL.
+Calliope uses SQLite and is designed to keep that database on a Railway persistent volume.
 
-### 1. Create services
+### 1. Attach a volume
 
-Create a Railway project with:
+Attach one volume to the `iris-calliope` service and mount it at:
 
-- one service for this repository
-- one PostgreSQL service
+```text
+/data
+```
 
-Railway should provide `DATABASE_URL` to the bot service through a variable reference.
+Calliope stores the database at:
+
+```text
+/data/calliope.db
+```
+
+Set:
+
+```text
+CALLIOPE_DB_PATH=/data/calliope.db
+```
+
+There is no `DATABASE_URL` and no PostgreSQL service required.
+
+Because SQLite is a single-file database, run **one Calliope service replica** against this volume rather than multiple replicas sharing the same file.
 
 ### 2. Configure environment variables
 
@@ -110,7 +125,7 @@ Calliope needs:
 
 She does **not** need the Server Members privileged intent for this design.
 
-Grant `Manage Server` only to the human administrators who should configure Calliope; the bot itself does not require Discord's `Manage Server` permission. If you want Calliope to inspect webhook objects in a future version, evaluate `Manage Webhooks` separately rather than granting it by default.
+Grant `Manage Server` only to the human administrators who should configure Calliope; the bot itself does not require Discord's `Manage Server` permission.
 
 ### 4. Start command
 
@@ -131,7 +146,7 @@ cp .env.example .env
 python -m calliope
 ```
 
-On Windows PowerShell, activate with `.venv\Scripts\Activate.ps1`.
+On Windows PowerShell, activate with `.venv\Scripts\Activate.ps1`. For local development you can set `CALLIOPE_DB_PATH=./calliope.db` instead of using `/data`.
 
 ## Current scope
 
@@ -140,7 +155,7 @@ This first rework intentionally focuses on the safe foundation:
 - watched-channel configuration
 - one-time RP-channel suggestions
 - trusted Tupperbox webhook ingestion
-- encrypted PostgreSQL storage
+- encrypted SQLite storage on a persistent volume
 - seven-day raw-message retention
 - periodic LLM summaries
 - persistent encrypted chronicle summaries

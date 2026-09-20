@@ -24,7 +24,7 @@ class Calliope(discord.Client):
         intents.message_content = True
         super().__init__(intents=intents)
         self.settings = settings
-        self.db = Database(settings.database_url, Cipher(settings.encryption_key), settings.raw_retention_days)
+        self.db = Database(settings.database_path, Cipher(settings.encryption_key), settings.raw_retention_days)
         self.llm = LLMClient(settings)
         self.tree = app_commands.CommandTree(self)
         self.group = app_commands.Group(name="calliope", description="Iris Calliope story archive controls")

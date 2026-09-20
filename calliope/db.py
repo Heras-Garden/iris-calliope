@@ -1,176 +1,270 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+import os
+from datetime import datetime, timedelta, timezone
 from typing import Iterable
 
-import asyncpg
+import aiosqlite
 
 from .crypto import Cipher
 
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS watched_channels (
-    guild_id BIGINT NOT NULL,
-    channel_id BIGINT NOT NULL,
-    added_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    guild_id INTEGER NOT NULL,
+    channel_id INTEGER NOT NULL,
+    added_at INTEGER NOT NULL DEFAULT (unixepoch()),
     PRIMARY KEY (guild_id, channel_id)
 );
 
 CREATE TABLE IF NOT EXISTS trusted_tupperbox_webhooks (
-    guild_id BIGINT NOT NULL,
-    webhook_id BIGINT NOT NULL,
-    added_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    guild_id INTEGER NOT NULL,
+    webhook_id INTEGER NOT NULL,
+    added_at INTEGER NOT NULL DEFAULT (unixepoch()),
     PRIMARY KEY (guild_id, webhook_id)
 );
 
 CREATE TABLE IF NOT EXISTS raw_messages (
-    id BIGSERIAL PRIMARY KEY,
-    guild_id BIGINT NOT NULL,
-    channel_id BIGINT NOT NULL,
-    message_id BIGINT NOT NULL UNIQUE,
-    webhook_id BIGINT NOT NULL,
-    character_name_enc BYTEA NOT NULL,
-    content_enc BYTEA NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL,
-    expires_at TIMESTAMPTZ NOT NULL,
-    summarized_at TIMESTAMPTZ
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id INTEGER NOT NULL,
+    channel_id INTEGER NOT NULL,
+    message_id INTEGER NOT NULL UNIQUE,
+    webhook_id INTEGER NOT NULL,
+    character_name_enc BLOB NOT NULL,
+    content_enc BLOB NOT NULL,
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL,
+    summarized_at INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS raw_messages_expiry_idx ON raw_messages (expires_at);
 CREATE INDEX IF NOT EXISTS raw_messages_unsummarized_idx ON raw_messages (guild_id, channel_id, summarized_at);
 
 CREATE TABLE IF NOT EXISTS chronicle_summaries (
-    id BIGSERIAL PRIMARY KEY,
-    guild_id BIGINT NOT NULL,
-    channel_id BIGINT NOT NULL,
-    period_start TIMESTAMPTZ NOT NULL,
-    period_end TIMESTAMPTZ NOT NULL,
-    summary_enc BYTEA NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id INTEGER NOT NULL,
+    channel_id INTEGER NOT NULL,
+    period_start INTEGER NOT NULL,
+    period_end INTEGER NOT NULL,
+    summary_enc BLOB NOT NULL,
+    created_at INTEGER NOT NULL DEFAULT (unixepoch())
 );
 """
 
 
+def _to_ts(value: datetime) -> int:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return int(value.timestamp())
+
+
+def _from_ts(value: int) -> datetime:
+    return datetime.fromtimestamp(int(value), tz=timezone.utc)
+
+
 class Database:
-    def __init__(self, url: str, cipher: Cipher, retention_days: int = 7) -> None:
-        self.url = url
+    def __init__(self, path: str, cipher: Cipher, retention_days: int = 7) -> None:
+        self.path = path
         self.cipher = cipher
         self.retention_days = retention_days
-        self.pool: asyncpg.Pool | None = None
+        self.conn: aiosqlite.Connection | None = None
 
     async def connect(self) -> None:
-        self.pool = await asyncpg.create_pool(self.url, min_size=1, max_size=5)
-        async with self.pool.acquire() as conn:
-            await conn.execute(SCHEMA)
+        directory = os.path.dirname(os.path.abspath(self.path))
+        os.makedirs(directory, exist_ok=True)
+        self.conn = await aiosqlite.connect(self.path)
+        self.conn.row_factory = aiosqlite.Row
+        await self.conn.execute("PRAGMA journal_mode=WAL")
+        await self.conn.execute("PRAGMA synchronous=NORMAL")
+        await self.conn.execute("PRAGMA busy_timeout=5000")
+        await self.conn.executescript(SCHEMA)
+        await self.conn.commit()
 
     async def close(self) -> None:
-        if self.pool:
-            await self.pool.close()
+        if self.conn:
+            await self.conn.close()
+            self.conn = None
 
-    def _pool(self) -> asyncpg.Pool:
-        if not self.pool:
+    def _conn(self) -> aiosqlite.Connection:
+        if not self.conn:
             raise RuntimeError("Database is not connected")
-        return self.pool
+        return self.conn
 
     async def add_channel(self, guild_id: int, channel_id: int) -> None:
-        await self._pool().execute("INSERT INTO watched_channels (guild_id, channel_id) VALUES ($1, $2) ON CONFLICT DO NOTHING", guild_id, channel_id)
+        await self._conn().execute("INSERT OR IGNORE INTO watched_channels (guild_id, channel_id) VALUES (?, ?)", (guild_id, channel_id))
+        await self._conn().commit()
 
     async def remove_channel(self, guild_id: int, channel_id: int) -> None:
-        await self._pool().execute("DELETE FROM watched_channels WHERE guild_id=$1 AND channel_id=$2", guild_id, channel_id)
+        await self._conn().execute("DELETE FROM watched_channels WHERE guild_id=? AND channel_id=?", (guild_id, channel_id))
+        await self._conn().commit()
 
     async def list_channels(self, guild_id: int) -> list[int]:
-        rows = await self._pool().fetch("SELECT channel_id FROM watched_channels WHERE guild_id=$1 ORDER BY added_at", guild_id)
+        cursor = await self._conn().execute("SELECT channel_id FROM watched_channels WHERE guild_id=? ORDER BY added_at", (guild_id,))
+        rows = await cursor.fetchall()
         return [int(row["channel_id"]) for row in rows]
 
     async def is_watched(self, guild_id: int, channel_id: int) -> bool:
-        return bool(await self._pool().fetchval("SELECT 1 FROM watched_channels WHERE guild_id=$1 AND channel_id=$2", guild_id, channel_id))
+        cursor = await self._conn().execute("SELECT 1 FROM watched_channels WHERE guild_id=? AND channel_id=? LIMIT 1", (guild_id, channel_id))
+        return await cursor.fetchone() is not None
 
     async def trust_webhook(self, guild_id: int, webhook_id: int) -> None:
-        await self._pool().execute("INSERT INTO trusted_tupperbox_webhooks (guild_id, webhook_id) VALUES ($1, $2) ON CONFLICT DO NOTHING", guild_id, webhook_id)
+        await self._conn().execute("INSERT OR IGNORE INTO trusted_tupperbox_webhooks (guild_id, webhook_id) VALUES (?, ?)", (guild_id, webhook_id))
+        await self._conn().commit()
 
     async def untrust_webhook(self, guild_id: int, webhook_id: int) -> None:
-        await self._pool().execute("DELETE FROM trusted_tupperbox_webhooks WHERE guild_id=$1 AND webhook_id=$2", guild_id, webhook_id)
+        await self._conn().execute("DELETE FROM trusted_tupperbox_webhooks WHERE guild_id=? AND webhook_id=?", (guild_id, webhook_id))
+        await self._conn().commit()
 
     async def list_webhooks(self, guild_id: int) -> list[int]:
-        rows = await self._pool().fetch("SELECT webhook_id FROM trusted_tupperbox_webhooks WHERE guild_id=$1 ORDER BY added_at", guild_id)
+        cursor = await self._conn().execute("SELECT webhook_id FROM trusted_tupperbox_webhooks WHERE guild_id=? ORDER BY added_at", (guild_id,))
+        rows = await cursor.fetchall()
         return [int(row["webhook_id"]) for row in rows]
 
     async def is_trusted_webhook(self, guild_id: int, webhook_id: int) -> bool:
-        return bool(await self._pool().fetchval("SELECT 1 FROM trusted_tupperbox_webhooks WHERE guild_id=$1 AND webhook_id=$2", guild_id, webhook_id))
+        cursor = await self._conn().execute("SELECT 1 FROM trusted_tupperbox_webhooks WHERE guild_id=? AND webhook_id=? LIMIT 1", (guild_id, webhook_id))
+        return await cursor.fetchone() is not None
 
     async def store_raw_message(self, guild_id: int, channel_id: int, message_id: int, webhook_id: int, character_name: str, content: str, created_at: datetime) -> None:
         expires_at = created_at + timedelta(days=self.retention_days)
-        await self._pool().execute("""
-            INSERT INTO raw_messages (guild_id, channel_id, message_id, webhook_id, character_name_enc, content_enc, created_at, expires_at)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-            ON CONFLICT (message_id) DO NOTHING
-            """, guild_id, channel_id, message_id, webhook_id, self.cipher.encrypt(character_name), self.cipher.encrypt(content), created_at, expires_at)
+        await self._conn().execute(
+            """
+            INSERT OR IGNORE INTO raw_messages
+            (guild_id, channel_id, message_id, webhook_id, character_name_enc, content_enc, created_at, expires_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                guild_id,
+                channel_id,
+                message_id,
+                webhook_id,
+                self.cipher.encrypt(character_name),
+                self.cipher.encrypt(content),
+                _to_ts(created_at),
+                _to_ts(expires_at),
+            ),
+        )
+        await self._conn().commit()
 
     async def unsummarized_groups(self, min_messages: int) -> list[tuple[int, int]]:
-        rows = await self._pool().fetch("""
-            SELECT guild_id, channel_id FROM raw_messages
-            WHERE summarized_at IS NULL AND expires_at > NOW()
+        cursor = await self._conn().execute(
+            """
+            SELECT guild_id, channel_id
+            FROM raw_messages
+            WHERE summarized_at IS NULL AND expires_at > unixepoch()
             GROUP BY guild_id, channel_id
-            HAVING COUNT(*) >= $1
-            """, min_messages)
-        return [(int(r["guild_id"]), int(r["channel_id"])) for r in rows]
+            HAVING COUNT(*) >= ?
+            """,
+            (min_messages,),
+        )
+        rows = await cursor.fetchall()
+        return [(int(row["guild_id"]), int(row["channel_id"])) for row in rows]
 
     async def get_unsummarized(self, guild_id: int, channel_id: int) -> list[dict]:
-        rows = await self._pool().fetch("""
-            SELECT id, character_name_enc, content_enc, created_at FROM raw_messages
-            WHERE guild_id=$1 AND channel_id=$2 AND summarized_at IS NULL AND expires_at > NOW()
+        cursor = await self._conn().execute(
+            """
+            SELECT id, character_name_enc, content_enc, created_at
+            FROM raw_messages
+            WHERE guild_id=? AND channel_id=? AND summarized_at IS NULL AND expires_at > unixepoch()
             ORDER BY created_at
-            """, guild_id, channel_id)
-        return [{"id": int(r["id"]), "character": self.cipher.decrypt(bytes(r["character_name_enc"])), "content": self.cipher.decrypt(bytes(r["content_enc"])), "created_at": r["created_at"]} for r in rows]
+            """,
+            (guild_id, channel_id),
+        )
+        rows = await cursor.fetchall()
+        return [
+            {
+                "id": int(row["id"]),
+                "character": self.cipher.decrypt(bytes(row["character_name_enc"])),
+                "content": self.cipher.decrypt(bytes(row["content_enc"])),
+                "created_at": _from_ts(row["created_at"]),
+            }
+            for row in rows
+        ]
 
     async def save_summary(self, guild_id: int, channel_id: int, period_start: datetime, period_end: datetime, summary: str, raw_ids: Iterable[int]) -> None:
         ids = list(raw_ids)
-        async with self._pool().acquire() as conn:
-            async with conn.transaction():
-                await conn.execute("""
-                    INSERT INTO chronicle_summaries (guild_id, channel_id, period_start, period_end, summary_enc)
-                    VALUES ($1,$2,$3,$4,$5)
-                    """, guild_id, channel_id, period_start, period_end, self.cipher.encrypt(summary))
-                if ids:
-                    await conn.execute("UPDATE raw_messages SET summarized_at=NOW() WHERE id = ANY($1::bigint[])", ids)
+        conn = self._conn()
+        try:
+            await conn.execute("BEGIN")
+            await conn.execute(
+                """
+                INSERT INTO chronicle_summaries
+                (guild_id, channel_id, period_start, period_end, summary_enc)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (guild_id, channel_id, _to_ts(period_start), _to_ts(period_end), self.cipher.encrypt(summary)),
+            )
+            if ids:
+                placeholders = ",".join("?" for _ in ids)
+                await conn.execute(f"UPDATE raw_messages SET summarized_at=unixepoch() WHERE id IN ({placeholders})", ids)
+            await conn.commit()
+        except Exception:
+            await conn.rollback()
+            raise
 
     async def recent_character_messages(self, guild_id: int, channel_ids: list[int]) -> list[dict]:
         if not channel_ids:
             return []
-        rows = await self._pool().fetch("""
+        placeholders = ",".join("?" for _ in channel_ids)
+        cursor = await self._conn().execute(
+            f"""
             SELECT channel_id, message_id, character_name_enc, content_enc, created_at
             FROM raw_messages
-            WHERE guild_id=$1 AND channel_id = ANY($2::bigint[]) AND expires_at > NOW()
+            WHERE guild_id=? AND channel_id IN ({placeholders}) AND expires_at > unixepoch()
             ORDER BY created_at DESC
-            """, guild_id, channel_ids)
+            """,
+            [guild_id, *channel_ids],
+        )
+        rows = await cursor.fetchall()
         return [
             {
-                "channel_id": int(r["channel_id"]),
-                "message_id": int(r["message_id"]),
-                "character": self.cipher.decrypt(bytes(r["character_name_enc"])),
-                "content": self.cipher.decrypt(bytes(r["content_enc"])),
-                "created_at": r["created_at"],
+                "channel_id": int(row["channel_id"]),
+                "message_id": int(row["message_id"]),
+                "character": self.cipher.decrypt(bytes(row["character_name_enc"])),
+                "content": self.cipher.decrypt(bytes(row["content_enc"])),
+                "created_at": _from_ts(row["created_at"]),
             }
-            for r in rows
+            for row in rows
         ]
 
     async def recent_summaries(self, guild_id: int, limit: int = 10) -> list[dict]:
-        rows = await self._pool().fetch("""
-            SELECT channel_id, period_start, period_end, summary_enc FROM chronicle_summaries
-            WHERE guild_id=$1 ORDER BY period_end DESC LIMIT $2
-            """, guild_id, limit)
-        return [{"channel_id": int(r["channel_id"]), "period_start": r["period_start"], "period_end": r["period_end"], "summary": self.cipher.decrypt(bytes(r["summary_enc"]))} for r in rows]
+        cursor = await self._conn().execute(
+            """
+            SELECT channel_id, period_start, period_end, summary_enc
+            FROM chronicle_summaries
+            WHERE guild_id=?
+            ORDER BY period_end DESC
+            LIMIT ?
+            """,
+            (guild_id, limit),
+        )
+        rows = await cursor.fetchall()
+        return [
+            {
+                "channel_id": int(row["channel_id"]),
+                "period_start": _from_ts(row["period_start"]),
+                "period_end": _from_ts(row["period_end"]),
+                "summary": self.cipher.decrypt(bytes(row["summary_enc"])),
+            }
+            for row in rows
+        ]
 
     async def delete_expired(self) -> int:
-        result = await self._pool().execute("DELETE FROM raw_messages WHERE expires_at <= NOW()")
-        return int(result.split()[-1])
+        cursor = await self._conn().execute("DELETE FROM raw_messages WHERE expires_at <= unixepoch()")
+        await self._conn().commit()
+        return max(0, cursor.rowcount)
 
     async def delete_message(self, guild_id: int, message_id: int) -> int:
-        result = await self._pool().execute("DELETE FROM raw_messages WHERE guild_id=$1 AND message_id=$2", guild_id, message_id)
-        return int(result.split()[-1])
+        cursor = await self._conn().execute("DELETE FROM raw_messages WHERE guild_id=? AND message_id=?", (guild_id, message_id))
+        await self._conn().commit()
+        return max(0, cursor.rowcount)
 
     async def delete_guild_data(self, guild_id: int) -> None:
-        async with self._pool().acquire() as conn:
-            async with conn.transaction():
-                for table in ("raw_messages", "chronicle_summaries", "trusted_tupperbox_webhooks", "watched_channels"):
-                    await conn.execute(f"DELETE FROM {table} WHERE guild_id=$1", guild_id)
+        conn = self._conn()
+        try:
+            await conn.execute("BEGIN")
+            for table in ("raw_messages", "chronicle_summaries", "trusted_tupperbox_webhooks", "watched_channels"):
+                await conn.execute(f"DELETE FROM {table} WHERE guild_id=?", (guild_id,))
+            await conn.commit()
+        except Exception:
+            await conn.rollback()
+            raise

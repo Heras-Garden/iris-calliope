@@ -2,7 +2,7 @@
 
 **Iris Calliope** is Hera's Garden's narrative archivist for collaborative Discord roleplay.
 
-Calliope is designed to read only **Tupperbox-proxied roleplay messages** in channels that a server administrator explicitly chooses. She stays silent in watched roleplay channels, temporarily retains encrypted raw RP text for up to seven days, creates narrative summaries through a configurable LLM endpoint, and then deletes the raw text. Long-term storage contains Calliope's own encrypted summaries rather than full transcripts.
+Calliope is designed to read only **Tupperbox-proxied roleplay messages** in channels that a server administrator explicitly chooses. She stays silent in watched roleplay channels, temporarily retains encrypted raw RP text for up to seven days, creates narrative summaries through a configurable LLM endpoint, and then deletes the raw text. Long-term storage contains Calliope's own encrypted summaries plus an encrypted fictional-character name registry rather than full transcripts.
 
 ## Privacy-first design
 
@@ -15,7 +15,7 @@ Calliope is intentionally story-centric rather than user-centric:
 - No historical backfill feature.
 - No ordinary user-message ingestion.
 - Raw Tupperbox RP text expires after 7 days even if summary generation fails.
-- Message content, character names, and generated summaries are encrypted at the application layer before SQLite storage.
+- Message content, character names, and generated summaries are encrypted at the application layer before SQLite storage.\n- Calliope keeps an encrypted name-only character registry so she can list fictional characters she has observed without linking them to Discord users.
 
 See [PRIVACY.md](PRIVACY.md) for the full data-handling model.
 
@@ -41,7 +41,7 @@ Calliope uses a strict webhook allowlist so unrelated webhooks never enter the a
 ### Story and privacy controls
 
 - `/calliope info` — show watched channels, retention behavior, source restrictions, and LLM status.
-- `/calliope summary` — privately read recent chronicle entries.
+- `/calliope summary` — privately read recent chronicle entries; administrators also see the latest Sunday weekly chronicle when one exists.\n- `/calliope weekly` — admin-only view of the latest server-wide Sunday weekly chronicle.\n- `/calliope characters` — privately list character names Calliope has learned from watched Tupperbox RP in channels the requester can view.
 - `/calliope find character:<name>` — privately locate a character's most recent message. Calliope checks her 7-day temporary store first, then searches older watched Tupperbox history on demand in expanding windows up to one year. Older history is not saved back into SQLite.
 - `/calliope privacy` — explain Calliope's data model.
 - `/calliope my-data` — explain what Calliope stores about the requesting Discord account.
@@ -59,7 +59,7 @@ A message enters Calliope's temporary RP store only when all of these are true:
 4. The webhook ID has been explicitly trusted as a Tupperbox source.
 5. The message has text content.
 
-Calliope does not use Tupperbox `showuser` or otherwise attempt to connect proxy characters to Discord accounts.
+Calliope does not use Tupperbox `showuser` or otherwise attempt to connect proxy characters to Discord accounts. The character registry stores fictional display names only. Existing retained messages are used to seed the registry after this feature is deployed; older Discord history is not persistently backfilled.
 
 ## LLM integration
 
@@ -69,7 +69,7 @@ Required when summary generation is enabled:
 
 - `LLM_BASE_URL`
 - `LLM_MODEL`
-- `LLM_API_KEY` if your endpoint requires one
+- `LLM_API_KEY` if your endpoint requires one\n\nEvery Sunday, Calliope can combine the prior week's already-generated chronicle entries into one encrypted weekly chronicle. The default generation boundary is 23:00 UTC and can be changed with `SUNDAY_SUMMARY_HOUR_UTC`.
 
 The system prompt explicitly tells the model to summarize fictional events only and not identify, rank, score, or profile the real people behind characters.
 
@@ -96,7 +96,7 @@ Calliope stores the database at:
 Set:
 
 ```text
-CALLIOPE_DB_PATH=/data/calliope.db
+CALLIOPE_DB_PATH=/data/calliope.db\nSUNDAY_SUMMARY_HOUR_UTC=23
 ```
 
 There is no `DATABASE_URL` and no PostgreSQL service required.
@@ -160,6 +160,6 @@ This first rework intentionally focuses on the safe foundation:
 - periodic LLM summaries
 - persistent encrypted chronicle summaries
 - privacy and deletion controls
-- permission-aware character lookup with temporary older-history fallback
+- permission-aware character lookup with temporary older-history fallback\n- encrypted name-only character registry and `/calliope characters`\n- encrypted Sunday weekly chronicles built from existing channel summaries
 
 Scene segmentation, richer chapter formatting, character/location indexes, and lore browsing can be layered on later without bringing back user analytics.

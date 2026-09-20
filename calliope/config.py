@@ -22,6 +22,7 @@ class Settings:
     summary_interval_hours: int
     summary_min_messages: int
     suggest_history_limit: int
+    sunday_summary_hour_utc: int
     raw_retention_days: int = 7
 
     @classmethod
@@ -36,6 +37,7 @@ class Settings:
             summary_interval_hours=max(1, int(os.getenv("SUMMARY_INTERVAL_HOURS", "6"))),
             summary_min_messages=max(1, int(os.getenv("SUMMARY_MIN_MESSAGES", "3"))),
             suggest_history_limit=min(100, max(1, int(os.getenv("SUGGEST_HISTORY_LIMIT", "50")))),
+            sunday_summary_hour_utc=min(23, max(0, int(os.getenv("SUNDAY_SUMMARY_HOUR_UTC", "23")))),
         )
 
     @property

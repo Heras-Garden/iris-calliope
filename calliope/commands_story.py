@@ -44,6 +44,10 @@ def _history_row(message: discord.Message) -> dict:
     }
 
 
+def _safe_name(value: str) -> str:
+    return discord.utils.escape_markdown(discord.utils.escape_mentions(value))
+
+
 class JumpToMessageView(discord.ui.View):
     def __init__(self, url: str) -> None:
         super().__init__(timeout=300)
@@ -124,6 +128,20 @@ async def _search_older_history(bot, guild: discord.Guild, channels: list[discor
     return None
 
 
+def _split_character_pages(names: list[str], limit: int = 1700) -> list[str]:
+    pages: list[str] = []
+    current = ""
+    for name in names:
+        line = f"• {_safe_name(name)}\n"
+        if current and len(current) + len(line) > limit:
+            pages.append(current.rstrip())
+            current = ""
+        current += line
+    if current:
+        pages.append(current.rstrip())
+    return pages
+
+
 def register_story(bot) -> None:
     @bot.group.command(name="suggest", description="Suggest likely RP channels without storing their history")
     async def suggest(interaction: discord.Interaction) -> None:
@@ -191,6 +209,24 @@ def register_story(bot) -> None:
         ids = await bot.db.list_webhooks(interaction.guild.id)
         await interaction.response.send_message("\n".join(f"• {i}" for i in ids) if ids else "No trusted webhook IDs.", ephemeral=True)
 
+    @bot.group.command(name="characters", description="List character names Calliope has learned from Tupperbox RP")
+    async def characters(interaction: discord.Interaction) -> None:
+        if not interaction.guild or not isinstance(interaction.user, discord.Member):
+            await interaction.response.send_message("This command is only available in a server.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        channels = await _visible_watched_channels(bot, interaction)
+        names = await bot.db.list_characters(interaction.guild.id, [channel.id for channel in channels])
+        if not names:
+            await interaction.followup.send("I don't know any characters from watched channels you can view yet.", ephemeral=True)
+            return
+        pages = _split_character_pages(names)
+        for index, page in enumerate(pages, start=1):
+            heading = f"**Characters Calliope knows — {len(names)} total**"
+            if len(pages) > 1:
+                heading += f" · page {index}/{len(pages)}"
+            await interaction.followup.send(f"{heading}\n{page}", ephemeral=True)
+
     @bot.group.command(name="find", description="Find a character's most recent RP message")
     @app_commands.describe(character="Character name to look for")
     async def find_character(interaction: discord.Interaction, character: str) -> None:
@@ -255,14 +291,37 @@ def register_story(bot) -> None:
             allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
         )
 
+    @bot.group.command(name="weekly", description="Read Calliope's latest Sunday weekly chronicle")
+    async def weekly(interaction: discord.Interaction) -> None:
+        if not interaction.guild:
+            await interaction.response.send_message("This command is only available in a server.", ephemeral=True)
+            return
+        if not is_admin(interaction):
+            await interaction.response.send_message("Manage Server permission is required for the server-wide weekly chronicle.", ephemeral=True)
+            return
+        row = await bot.db.latest_weekly_summary(interaction.guild.id)
+        if not row:
+            await interaction.response.send_message("Calliope has not written a Sunday weekly chronicle yet.", ephemeral=True)
+            return
+        heading = f"**Sunday Weekly Chronicle — week ending {row['period_end'].date().isoformat()}**\n"
+        text = heading + row["summary"]
+        await interaction.response.send_message(text[:1990], ephemeral=True)
+
     @bot.group.command(name="summary", description="Read recent Calliope chronicle entries")
     async def summary(interaction: discord.Interaction) -> None:
         if not interaction.guild:
             await interaction.response.send_message("This command is only available in a server.", ephemeral=True)
             return
+        weekly_row = await bot.db.latest_weekly_summary(interaction.guild.id) if is_admin(interaction) else None
         rows = await bot.db.recent_summaries(interaction.guild.id, 5)
-        if not rows:
+        if not weekly_row and not rows:
             await interaction.response.send_message("Calliope has not written a chronicle entry yet.", ephemeral=True)
             return
-        text = "\n\n".join(f"**<#{row['channel_id']}>**\n{row['summary']}" for row in reversed(rows))
-        await interaction.response.send_message(text[-1900:], ephemeral=True)
+        parts: list[str] = []
+        if weekly_row:
+            parts.append(f"**Sunday Weekly Chronicle — week ending {weekly_row['period_end'].date().isoformat()}**\n{weekly_row['summary']}")
+        if rows:
+            recent = "\n\n".join(f"**<#{row['channel_id']}>**\n{row['summary']}" for row in reversed(rows))
+            parts.append(f"**Recent Chronicle Entries**\n{recent}")
+        text = "\n\n".join(parts)
+        await interaction.response.send_message(text[:1990], ephemeral=True)

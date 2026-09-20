@@ -50,11 +50,11 @@ Calliope does not intentionally:
 - infer relationships between Discord users;
 - build behavioral profiles;
 - collect ordinary server conversation outside watched RP sources; or
-- perform persistent historical backfills of server message history.
+- perform persistent historical backfills of server message history; or\n- use the character registry to identify or profile the real people behind fictional characters.
 
 ## LLM processing
 
-Calliope can send temporary RP text to the LLM endpoint configured by the operator for the sole purpose of producing narrative summaries. Calliope itself does not train or fine-tune models on Discord message content.
+Calliope can send temporary RP text to the LLM endpoint configured by the operator for the sole purpose of producing narrative summaries. Calliope can also send her own already-generated chronicle entries to that endpoint to create the Sunday weekly chronicle. Calliope itself does not train or fine-tune models on Discord message content.
 
 A deployment operator is responsible for choosing an LLM provider or self-hosted endpoint whose data handling is appropriate for the community and for disclosing any third-party processing that applies to that deployment.
 

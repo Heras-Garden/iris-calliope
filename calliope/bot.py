@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, time, timedelta, timezone
 
 import discord
 from discord import app_commands
@@ -38,10 +39,12 @@ class Calliope(discord.Client):
         self.tree.add_command(self.group)
         await self.tree.sync()
         self.summarize_pending.start()
+        self.weekly_chronicle.start()
         self.retention_cleanup.start()
 
     async def close(self) -> None:
         self.summarize_pending.cancel()
+        self.weekly_chronicle.cancel()
         self.retention_cleanup.cancel()
         await self.db.close()
         await super().close()
@@ -78,6 +81,47 @@ class Calliope(discord.Client):
     async def before_summarize(self) -> None:
         await self.wait_until_ready()
         self.summarize_pending.change_interval(hours=self.settings.summary_interval_hours)
+
+    def _most_recent_sunday_boundary(self, now: datetime) -> datetime:
+        days_since_sunday = (now.weekday() + 1) % 7
+        sunday_date = now.date() - timedelta(days=days_since_sunday)
+        boundary = datetime.combine(sunday_date, time(hour=self.settings.sunday_summary_hour_utc, tzinfo=timezone.utc))
+        if now < boundary:
+            boundary -= timedelta(days=7)
+        return boundary
+
+    @tasks.loop(hours=1)
+    async def weekly_chronicle(self) -> None:
+        if not self.settings.llm_enabled:
+            return
+        now = datetime.now(timezone.utc)
+        period_end = self._most_recent_sunday_boundary(now)
+        period_start = period_end - timedelta(days=7)
+        week_key = period_end.date().isoformat()
+
+        for guild in self.guilds:
+            if await self.db.weekly_summary_exists(guild.id, week_key):
+                continue
+            rows = await self.db.summaries_between(guild.id, period_start, period_end)
+            if not rows:
+                continue
+            source = "\n\n".join(
+                f"Channel {row['channel_id']} ({row['period_start'].isoformat()} to {row['period_end'].isoformat()}):\n{row['summary']}"
+                for row in rows
+            )
+            if len(source) > 60000:
+                source = source[:30000] + "\n\n[Middle entries omitted for context size.]\n\n" + source[-30000:]
+            try:
+                summary = await self.llm.summarize_week(source)
+            except Exception:
+                log.exception("Weekly summary failed for guild=%s week=%s", guild.id, week_key)
+                continue
+            await self.db.save_weekly_summary(guild.id, week_key, period_start, period_end, summary)
+            log.info("Created Sunday weekly chronicle for guild=%s week=%s", guild.id, week_key)
+
+    @weekly_chronicle.before_loop
+    async def before_weekly_chronicle(self) -> None:
+        await self.wait_until_ready()
 
     @tasks.loop(hours=1)
     async def retention_cleanup(self) -> None:

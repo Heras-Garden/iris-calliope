@@ -134,6 +134,26 @@ class Database:
                 if ids:
                     await conn.execute("UPDATE raw_messages SET summarized_at=NOW() WHERE id = ANY($1::bigint[])", ids)
 
+    async def recent_character_messages(self, guild_id: int, channel_ids: list[int]) -> list[dict]:
+        if not channel_ids:
+            return []
+        rows = await self._pool().fetch("""
+            SELECT channel_id, message_id, character_name_enc, content_enc, created_at
+            FROM raw_messages
+            WHERE guild_id=$1 AND channel_id = ANY($2::bigint[]) AND expires_at > NOW()
+            ORDER BY created_at DESC
+            """, guild_id, channel_ids)
+        return [
+            {
+                "channel_id": int(r["channel_id"]),
+                "message_id": int(r["message_id"]),
+                "character": self.cipher.decrypt(bytes(r["character_name_enc"])),
+                "content": self.cipher.decrypt(bytes(r["content_enc"])),
+                "created_at": r["created_at"],
+            }
+            for r in rows
+        ]
+
     async def recent_summaries(self, guild_id: int, limit: int = 10) -> list[dict]:
         rows = await self._pool().fetch("""
             SELECT channel_id, period_start, period_end, summary_enc FROM chronicle_summaries

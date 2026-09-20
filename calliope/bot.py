@@ -48,6 +48,9 @@ class Calliope(discord.Client):
 
     async def on_ready(self) -> None:
         log.info("Iris Calliope connected as %s", self.user)
+        log.info("Connected to %s server(s)", len(self.guilds))
+        for guild in self.guilds:
+            log.info("- %s — %s", guild.name, guild.id)
 
     async def on_message(self, message: discord.Message) -> None:
         if not message.guild or not message.webhook_id or not message.content:

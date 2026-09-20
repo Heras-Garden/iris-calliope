@@ -33,6 +33,8 @@ Character names and message text are encrypted before they are written to Postgr
 
 Raw roleplay text is retained for no more than **7 days**. Expired raw messages are deleted automatically whether or not summary generation succeeded.
 
+When a member explicitly runs `/calliope find`, Calliope first searches this seven-day temporary store. If no exact character match is found, she may temporarily read older message history from watched channels in expanding windows (20, 30, 60, 90, 180, and up to 365 days). This older history search is restricted to trusted Tupperbox webhook messages and channels the requesting member can already view. Messages read during this fallback search are not inserted into Calliope's database or retained as a historical backfill.
+
 ## What Calliope stores long-term
 
 Calliope may retain encrypted narrative summaries created from the temporary RP transcript. These summaries are designed to describe fictional events, characters, locations, and unresolved story threads rather than the behavior of the real people participating in the roleplay.

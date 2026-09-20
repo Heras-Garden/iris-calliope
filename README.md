@@ -42,6 +42,7 @@ Calliope uses a strict webhook allowlist so unrelated webhooks never enter the a
 
 - `/calliope info` — show watched channels, retention behavior, source restrictions, and LLM status.
 - `/calliope summary` — privately read recent chronicle entries.
+- `/calliope find character:<name>` — privately locate a character's most recent message. Calliope checks her 7-day temporary store first, then searches older watched Tupperbox history on demand in expanding windows up to one year. Older history is not saved back into the database.
 - `/calliope privacy` — explain Calliope's data model.
 - `/calliope my-data` — explain what Calliope stores about the requesting Discord account.
 - `/calliope delete-my-data` — request deletion of account-linked data; in the current model there is no Discord-user-linked RP profile.
@@ -124,6 +125,7 @@ worker: python -m calliope
 ```bash
 python -m venv .venv
 source .venv/bin/activate
+pip install -r requirements.txt
 pip install -e .
 cp .env.example .env
 python -m calliope
@@ -143,5 +145,6 @@ This first rework intentionally focuses on the safe foundation:
 - periodic LLM summaries
 - persistent encrypted chronicle summaries
 - privacy and deletion controls
+- permission-aware character lookup with temporary older-history fallback
 
 Scene segmentation, richer chapter formatting, character/location indexes, and lore browsing can be layered on later without bringing back user analytics.

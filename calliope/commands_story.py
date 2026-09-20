@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from difflib import get_close_matches
 
 import discord
 from discord import app_commands
 
 from .commands_core import is_admin
+
+
+FIND_HISTORY_WINDOWS = ((7, 20), (20, 30), (30, 60), (60, 90), (90, 180), (180, 365))
 
 
 def _normalize_character_name(value: str) -> str:
@@ -28,6 +32,16 @@ def _found_text(requester_id: int, row: dict) -> str:
     when = discord.utils.format_dt(row["created_at"], style="R")
     preview = _message_preview(row["content"])
     return f"<@{requester_id}>, I found **{character}**.\nLast seen in <#{row['channel_id']}> {when}.\n\n> {preview}"
+
+
+def _history_row(message: discord.Message) -> dict:
+    return {
+        "channel_id": message.channel.id,
+        "message_id": message.id,
+        "character": message.author.display_name,
+        "content": message.content,
+        "created_at": message.created_at,
+    }
 
 
 class JumpToMessageView(discord.ui.View):
@@ -62,6 +76,52 @@ class ConfirmCharacterView(discord.ui.View):
         if not await self._check_requester(interaction):
             return
         await interaction.response.edit_message(content="Okay — try /calliope find again with another character name.", view=None)
+
+
+async def _visible_watched_channels(bot, interaction: discord.Interaction) -> list[discord.TextChannel]:
+    if not interaction.guild or not isinstance(interaction.user, discord.Member):
+        return []
+    watched_ids = await bot.db.list_channels(interaction.guild.id)
+    channels: list[discord.TextChannel] = []
+    for channel_id in watched_ids:
+        channel = interaction.guild.get_channel(channel_id)
+        if not isinstance(channel, discord.TextChannel):
+            continue
+        permissions = channel.permissions_for(interaction.user)
+        if permissions.view_channel and permissions.read_message_history:
+            channels.append(channel)
+    return channels
+
+
+async def _search_older_history(bot, guild: discord.Guild, channels: list[discord.TextChannel], query: str, candidates: dict[str, dict]) -> dict | None:
+    trusted_webhooks = set(await bot.db.list_webhooks(guild.id))
+    if not trusted_webhooks:
+        return None
+
+    now = datetime.now(timezone.utc)
+    for newer_days, older_days in FIND_HISTORY_WINDOWS:
+        after = now - timedelta(days=older_days)
+        before = now - timedelta(days=newer_days)
+        exact_match: dict | None = None
+
+        for channel in channels:
+            try:
+                async for message in channel.history(limit=None, after=after, before=before, oldest_first=False):
+                    if not message.webhook_id or message.webhook_id not in trusted_webhooks or not message.content:
+                        continue
+                    row = _history_row(message)
+                    key = _normalize_character_name(row["character"])
+                    if key and (key not in candidates or row["created_at"] > candidates[key]["created_at"]):
+                        candidates[key] = row
+                    if key == query and (exact_match is None or row["created_at"] > exact_match["created_at"]):
+                        exact_match = row
+            except (discord.Forbidden, discord.HTTPException):
+                continue
+
+        if exact_match is not None:
+            return exact_match
+
+    return None
 
 
 def register_story(bot) -> None:
@@ -131,38 +191,33 @@ def register_story(bot) -> None:
         ids = await bot.db.list_webhooks(interaction.guild.id)
         await interaction.response.send_message("\n".join(f"• {i}" for i in ids) if ids else "No trusted webhook IDs.", ephemeral=True)
 
-    @bot.group.command(name="find", description="Find a character's most recent retained RP message")
+    @bot.group.command(name="find", description="Find a character's most recent RP message")
     @app_commands.describe(character="Character name to look for")
     async def find_character(interaction: discord.Interaction, character: str) -> None:
         if not interaction.guild or not isinstance(interaction.user, discord.Member):
             await interaction.response.send_message("This command is only available in a server.", ephemeral=True)
             return
 
-        watched_ids = await bot.db.list_channels(interaction.guild.id)
-        visible_ids: list[int] = []
-        for channel_id in watched_ids:
-            channel = interaction.guild.get_channel(channel_id)
-            if isinstance(channel, discord.TextChannel) and channel.permissions_for(interaction.user).view_channel:
-                visible_ids.append(channel_id)
-
-        rows = await bot.db.recent_character_messages(interaction.guild.id, visible_ids)
-        if not rows:
-            await interaction.response.send_message("I don't have any retained Tupperbox roleplay from channels you can view yet.", ephemeral=True)
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        channels = await _visible_watched_channels(bot, interaction)
+        if not channels:
+            await interaction.followup.send("There are no watched channels you can search.", ephemeral=True)
             return
 
+        visible_ids = [channel.id for channel in channels]
+        rows = await bot.db.recent_character_messages(interaction.guild.id, visible_ids)
         query = _normalize_character_name(character)
-        latest_by_name: dict[str, dict] = {}
-        display_names: dict[str, str] = {}
+        candidates: dict[str, dict] = {}
+
         for row in rows:
             key = _normalize_character_name(row["character"])
-            if key and key not in latest_by_name:
-                latest_by_name[key] = row
-                display_names[key] = row["character"]
+            if key and key not in candidates:
+                candidates[key] = row
 
-        if query in latest_by_name:
-            row = latest_by_name[query]
+        if query in candidates:
+            row = candidates[query]
             url = _message_url(interaction.guild.id, row["channel_id"], row["message_id"])
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 _found_text(interaction.user.id, row),
                 view=JumpToMessageView(url),
                 ephemeral=True,
@@ -170,20 +225,31 @@ def register_story(bot) -> None:
             )
             return
 
-        closest = get_close_matches(query, list(latest_by_name.keys()), n=1, cutoff=0.6)
+        row = await _search_older_history(bot, interaction.guild, channels, query, candidates)
+        if row is not None:
+            url = _message_url(interaction.guild.id, row["channel_id"], row["message_id"])
+            await interaction.followup.send(
+                _found_text(interaction.user.id, row),
+                view=JumpToMessageView(url),
+                ephemeral=True,
+                allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
+            )
+            return
+
+        closest = get_close_matches(query, list(candidates.keys()), n=1, cutoff=0.6)
         if not closest:
-            await interaction.response.send_message(
-                f"I don't recognize **{discord.utils.escape_markdown(character)}** in my current 7-day memory, and I couldn't find a close match.",
+            await interaction.followup.send(
+                f"I couldn't find **{discord.utils.escape_markdown(character)}** in the last year of watched Tupperbox roleplay, and I couldn't find a close name match.",
                 ephemeral=True,
             )
             return
 
         key = closest[0]
-        candidate = display_names[key]
-        row = latest_by_name[key]
+        candidate = candidates[key]["character"]
+        row = candidates[key]
         view = ConfirmCharacterView(interaction.user.id, interaction.guild.id, candidate, row)
-        await interaction.response.send_message(
-            f"<@{interaction.user.id}>, I don't know **{discord.utils.escape_markdown(character)}**. Did you mean **{discord.utils.escape_markdown(candidate)}**?",
+        await interaction.followup.send(
+            f"<@{interaction.user.id}>, I couldn't find **{discord.utils.escape_markdown(character)}** exactly. Did you mean **{discord.utils.escape_markdown(candidate)}**?",
             view=view,
             ephemeral=True,
             allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),

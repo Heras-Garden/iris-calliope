@@ -1,0 +1,4 @@
+asyncpg>=0.30,<1
+cryptography>=43,<46
+discord.py>=2.5,<3
+httpx>=0.27,<1
